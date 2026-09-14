@@ -22,7 +22,8 @@ DIET_TARGETS = {
 user_logs = {food: 0.0 for food in DIET_TARGETS}
 
 def send_whatsapp_message(recipient_number, text_body):
-    url = f"https://facebook.com{PHONE_NUMBER_ID}/messages"
+    # LINE 21 FIX: Added graph.facebook.com and API version v18.0
+    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json"
@@ -50,61 +51,69 @@ def webhook_receive():
     global user_logs
     data = request.get_json()
     try:
-        message = data['entry']['changes']['value']['messages']
-        from_number = message['from']
-        
-        if message['type'] == 'text':
-            incoming_msg = message['text']['body'].lower().strip()
-            reply = ""
+        # LINES 41-43 FIX: Unpack list arrays with [0] to prevent KeyError
+        entry = data['entry'][0]
+        changes = entry['changes'][0]
+        value = changes['value']
 
-            if incoming_msg == "status":
-                reply = "📋 *Your Daily Intake Status:*\n\n"
-                for food, info in DIET_TARGETS.items():
-                    consumed = user_logs[food]
-                    c_str = int(consumed) if consumed.is_integer() else consumed
-                    t_str = int(info['target']) if isinstance(info['target'], int) or info['target'].is_integer() else info['target']
-                    reply += f"• *{food.title()}*: {c_str}/{t_str} {info['unit']}\n"
-                reply += "\n🔥 Total Target: 2500 Cal | 120g Protein"
+        if 'messages' in value:
+            message = value['messages'][0]
+            from_number = message['from']
+            
+            if message['type'] == 'text':
+                incoming_msg = message['text']['body'].lower().strip()
+                reply = ""
 
-            elif incoming_msg == "reset":
-                user_logs = {food: 0.0 for food in DIET_TARGETS}
-                reply = "🔄 Daily logs have been reset to 0!"
+                if incoming_msg == "status":
+                    reply = "📋 *Your Daily Intake Status:*\n\n"
+                    for food, info in DIET_TARGETS.items():
+                        consumed = user_logs[food]
+                        c_str = int(consumed) if consumed.is_integer() else consumed
+                        t_str = int(info['target']) if isinstance(info['target'], int) or info['target'].is_integer() else info['target']
+                        reply += f"• *{food.title()}*: {c_str}/{t_str} {info['unit']}\n"
+                    reply += "\n🔥 Total Target: 2500 Cal | 120g Protein"
 
-            else:
-                match = re.match(r"^([0-9\.]+)\s+(.+)$", incoming_msg)
-                if match:
-                    amount = float(match.group(1))
-                    food_input = match.group(2).strip()
-                    matched_food = None
-                    for food in DIET_TARGETS:
-                        if food in food_input or food_input in food:
-                            matched_food = food
-                            break
+                elif incoming_msg == "reset":
+                    user_logs = {food: 0.0 for food in DIET_TARGETS}
+                    reply = "🔄 Daily logs have been reset to 0!"
 
-                    if matched_food:
-                        user_logs[matched_food] += amount
-                        target = DIET_TARGETS[matched_food]["target"]
-                        consumed = user_logs[matched_food]
-                        remaining = target - consumed
-                        unit = DIET_TARGETS[matched_food]["unit"]
-
-                        a_str = int(amount) if amount.is_integer() else amount
-                        r_str = int(remaining) if remaining.is_integer() else remaining
-
-                        if remaining > 0:
-                            reply = f"✅ {a_str} {matched_food} logged. {r_str} {unit} more to go!"
-                        elif remaining == 0:
-                            reply = f"🎉 Goal reached for {matched_food}!"
-                        else:
-                            reply = f"⚠️ Over Limit! Exceeded {matched_food} by {abs(r_str)} {unit}."
-                    else:
-                        reply = "❌ Food item not found."
                 else:
-                    reply = "❌ Invalid format. Use:\n• `2 eggs`\n• `status`"
+                    match = re.match(r"^([0-9\.]+)\s+(.+)$", incoming_msg)
+                    if match:
+                        amount = float(match.group(1))
+                        food_input = match.group(2).strip()
+                        matched_food = None
+                        for food in DIET_TARGETS:
+                            if food in food_input or food_input in food:
+                                matched_food = food
+                                break
 
-            send_whatsapp_message(from_number, reply)
+                        if matched_food:
+                            user_logs[matched_food] += amount
+                            target = DIET_TARGETS[matched_food]["target"]
+                            consumed = user_logs[matched_food]
+                            remaining = target - consumed
+                            unit = DIET_TARGETS[matched_food]["unit"]
+
+                            a_str = int(amount) if amount.is_integer() else amount
+                            r_str = int(remaining) if remaining.is_integer() else remaining
+
+                            if remaining > 0:
+                                reply = f"✅ {a_str} {matched_food} logged. {r_str} {unit} more to go!"
+                            elif remaining == 0:
+                                reply = f"🎉 Goal reached for {matched_food}!"
+                            else:
+                                reply = f"⚠️ Over Limit! Exceeded {matched_food} by {abs(r_str)} {unit}."
+                        else:
+                            reply = "❌ Food item not found."
+                    else:
+                        reply = "❌ Invalid format. Use:\n• `2 eggs`\n• `status`"
+
+                send_whatsapp_message(from_number, reply)
     except Exception as e:
-        pass
+        # LINE 87 FIX: Log error instead of passing silently
+        print(f"Error processing webhook: {e}")
+        
     return jsonify({"status": "success"}), 200
 
 if __name__ == "__main__":
