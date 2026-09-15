@@ -7,6 +7,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
+# --- TARGET PHONE NUMBER FOR AUTOMATIC NOTIFICATIONS ---
+TARGET_PHONE_NUMBER = "919748625090"
+
 # --- META CREDENTIALS ---
 ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN", "EAAPaOr3UNogBSeScgYCJn8fEjzJ3USnfLPHwvITupw2inGpSeWym20Me6gHRuVUAvGGzD1uOUoTzhOyp3h6ZAD2ZCEEklaonNOIhbdaEeQhcfNWoJYFM562He8JgdfQB95VMnOa86tBxpKi4fA7U6kK2QUjmKKXpTmIGFE3wF70du7ZBmDKZB9v4OeO2Q3NrTAZDZD")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "1335444236311842")
@@ -77,21 +80,6 @@ def update_database():
     except Exception as e:
         print(f"Database update error: {e}")
 
-# Initialize baseline on bootup
-sync_from_database()
-
-def reset_daily_logs():
-    sync_from_database()
-    print("⏰ Automatic Midnight Reset Completed.")
-
-scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
-scheduler.add_job(reset_daily_logs, 'cron', hour=0, minute=0)
-scheduler.start()
-
-@app.route("/health", methods=["GET"])
-def health_check():
-    return "OK", 200
-
 def send_whatsapp_message(recipient_number, text_body):
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     headers = {
@@ -106,6 +94,29 @@ def send_whatsapp_message(recipient_number, text_body):
     }
     res = requests.post(url, headers=headers, json=data)
     return res.json()
+
+# Initialize baseline on bootup
+sync_from_database()
+
+def reset_daily_logs():
+    """Triggered automatically at UTC midnight."""
+    sync_from_database()
+    print("⏰ Automatic Midnight Reset Completed.")
+    
+    # Send reset confirmation via WhatsApp
+    reset_msg = "🔄 *Automatic Daily Reset Completed (UTC Midnight)!*\n\nYour diet trackers have been synced and refreshed for the new day. Ready to log! 🎯"
+    try:
+        send_whatsapp_message(TARGET_PHONE_NUMBER, reset_msg)
+    except Exception as e:
+        print(f"Failed to send reset notification message: {e}")
+
+scheduler = BackgroundScheduler(timezone="UTC")
+scheduler.add_job(reset_daily_logs, 'cron', hour=0, minute=0)
+scheduler.start()
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    return "OK", 200
 
 @app.route("/webhook", methods=["GET"])
 def webhook_verify():
@@ -174,11 +185,11 @@ def webhook_receive():
                     else:
                         reply = "📭 No historical logs found in your database yet."
 
-                # 3. MANUAL RESET
+                # 3. MANUAL RESET COMMAND
                 elif incoming_msg in ["reset", "clear"]:
                     user_logs = {food: 0.0 for food in DIET_TARGETS}
                     update_database()
-                    reply = "🔄 *Daily Trackers Cleared to Zero.*"
+                    reply = "🔄 *Manual Reset Triggered:* Daily trackers cleared to zero."
 
                 # 4. ENTRY LOGGING LOGIC
                 else:
