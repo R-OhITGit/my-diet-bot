@@ -1,6 +1,7 @@
 import os
 import re
 import requests
+from datetime import datetime
 from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -10,6 +11,10 @@ app = Flask(__name__)
 ACCESS_TOKEN = "EAAPaOr3UNogBSeScgYCJn8fEjzJ3USnfLPHwvITupw2inGpSeWym20Me6gHRuVUAvGGzD1uOUoTzhOyp3h6ZAD2ZCEEklaonNOIhbdaEeQhcfNWoJYFM562He8JgdfQB95VMnOa86tBxpKi4fA7U6kK2QUjmKKXpTmIGFE3wF70du7ZBmDKZB9v4OeO2Q3NrTAZDZD"
 PHONE_NUMBER_ID = "1335444236311842"
 VERIFY_TOKEN = "my_secret_diet_bot_token"
+
+# --- SUPABASE CREDENTIALS ---
+SUPABASE_URL = "https://supabase.com/dashboard/project/ylygykwamxlxadtapdbe"
+SUPABASE_KEY = "sb_publishable_9E3HxGiqRjjGnvTqSkIySg_Yr9PoFKr"
 
 DIET_TARGETS = {
     "eggs": {"target": 4, "unit": "pcs"},
@@ -22,35 +27,77 @@ DIET_TARGETS = {
 
 user_logs = {food: 0.0 for food in DIET_TARGETS}
 
-# --- MIDNIGHT AUTOMATIC RESET TASK ---
-def reset_daily_logs():
+def get_db_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+
+def sync_from_database():
+    """Fetches today's logs from the database or creates a new entry for today"""
     global user_logs
-    user_logs = {food: 0.0 for food in DIET_TARGETS}
-    print("⏰ Automatic Midnight Reset: All food logs reset to zero.")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    url = f"{SUPABASE_URL}/rest/v1/daily_history?log_date=eq.{today_str}"
+    
+    try:
+        response = requests.get(url, headers=get_db_headers())
+        data = response.json()
+        
+        if data:
+            row = data[0]
+            user_logs["eggs"] = float(row.get("eggs", 0.0))
+            user_logs["peanut butter"] = float(row.get("peanut_butter", 0.0))
+            user_logs["bread"] = float(row.get("bread", 0.0))
+            user_logs["rice"] = float(row.get("rice", 0.0))
+            user_logs["soya chunks"] = float(row.get("soya_chunks", 0.0))
+            user_logs["whey"] = float(row.get("whey", 0.0))
+        else:
+            insert_url = f"{SUPABASE_URL}/rest/v1/daily_history"
+            payload = {"log_date": today_str}
+            requests.post(insert_url, headers=get_db_headers(), json=payload)
+            user_logs = {food: 0.0 for food in DIET_TARGETS}
+    except Exception as e:
+        print(f"Database sync error: {e}")
+
+def update_database():
+    """Saves current live data directly into the database row"""
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    url = f"{SUPABASE_URL}/rest/v1/daily_history?log_date=eq.{today_str}"
+    payload = {
+        "eggs": user_logs["eggs"],
+        "peanut_butter": user_logs["peanut butter"],
+        "bread": user_logs["bread"],
+        "rice": user_logs["rice"],
+        "soya_chunks": user_logs["soya chunks"],
+        "whey": user_logs["whey"]
+    }
+    try:
+        requests.patch(url, headers=get_db_headers(), json=payload)
+    except Exception as e:
+        print(f"Database update error: {e}")
+
+# Initialize baseline on bootup
+sync_from_database()
+
+def reset_daily_logs():
+    sync_from_database()
+    print("⏰ Automatic Midnight Reset and History Save Completed.")
 
 scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
 scheduler.add_job(reset_daily_logs, 'cron', hour=0, minute=0)
 scheduler.start()
 
-# --- LIGHTWEIGHT HEALTHCHECK FOR UPTIMEROBOT ---
 @app.route("/health", methods=["GET"])
 def health_check():
     return "OK", 200
 
 def send_whatsapp_message(recipient_number, text_body):
-    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "messaging_product": "whatsapp",
-        "to": recipient_number,
-        "type": "text",
-        "text": {"body": text_body}
-    }
-    response = requests.post(url, headers=headers, json=data)
-    return response.json()
+    url = f"https://facebook.com{PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
+    data = {"messaging_product": "whatsapp", "to": recipient_number, "type": "text", "text": {"body": text_body}}
+    requests.post(url, headers=headers, json=data)
 
 @app.route("/webhook", methods=["GET"])
 def webhook_verify():
@@ -78,18 +125,17 @@ def webhook_receive():
                 incoming_msg = message['text']['body'].lower().strip()
                 reply = ""
 
+                sync_from_database()
+
                 # 1. STATUS COMMAND
                 if incoming_msg == "status":
-                    in_progress = []
-                    completed = []
-                    total_items = len(DIET_TARGETS)
+                    in_progress, completed = [], []
                     completed_count = 0
 
                     for food, info in DIET_TARGETS.items():
                         consumed = user_logs[food]
                         c_str = int(consumed) if consumed.is_integer() else consumed
                         t_str = int(info['target']) if isinstance(info['target'], int) or info['target'].is_integer() else info['target']
-                        
                         line = f"• *{food.title()}*: {c_str} / {t_str} {info['unit']}"
                         if consumed >= info['target']:
                             completed.append(line)
@@ -97,33 +143,47 @@ def webhook_receive():
                         else:
                             in_progress.append(line)
 
-                    completion_pct = int((completed_count / total_items) * 100)
-                    
+                    completion_pct = int((completed_count / len(DIET_TARGETS)) * 100)
                     reply = "📈 *Daily Executive Summary*\n\n"
-                    if in_progress:
-                        reply += "⏳ *In Progress*\n" + "\n".join(in_progress) + "\n\n"
-                    if completed:
-                        reply += "✅ *Objectives Met*\n" + "\n".join(completed) + "\n\n"
-                    reply += f"🎯 *Daily Objective:* 2,500 kcal | 120g Protein\n"
-                    reply += f"📊 *Completion Rate:* {completion_pct}%"
+                    if in_progress: reply += "⏳ *In Progress*\n" + "\n".join(in_progress) + "\n\n"
+                    if completed: reply += "✅ *Objectives Met*\n" + "\n".join(completed) + "\n\n"
+                    reply += f"🎯 *Daily Objective:* 2,500 kcal | 120g Protein\n📊 *Completion Rate:* {completion_pct}%"
 
-                # 2. MANUAL RESET COMMAND
-                elif incoming_msg in ["reset", "clear", "reset log"]:
-                    reset_daily_logs()
-                    reply = "⚙️ *System Maintenance*\n\n🔄 *Daily Metrics Reset Completed*\nAll consumption trackers have been restored to zero."
+                # 2. DYNAMIC CUSTOM HISTORY COMMAND (e.g., "history 10", "history 30", or "history")
+                elif incoming_msg.startswith("history"):
+                    # Check if a custom number of days was provided
+                    history_match = re.match(r"^history\s+(\d+)$", incoming_msg)
+                    if history_match:
+                        days = int(history_match.group(1))
+                    else:
+                        days = 7  # Default view if you just text "history"
 
-                # 3. LOGGING ITEMS WITH REMAINING STATUS FOR ALL ITEMS
+                    url = f"{SUPABASE_URL}/rest/v1/daily_history?order=log_date.desc&limit={days}"
+                    res = requests.get(url, headers=get_db_headers()).json()
+                    
+                    if res and isinstance(res, list):
+                        reply = f"🗓️ *Your Intake History (Last {len(res)} Days)*\n\n"
+                        for row in res:
+                            reply += f"📅 *{row['log_date']}*\n"
+                            reply += f"🥚 Eggs: {row['eggs']} | 🥜 PB: {row['peanut_butter']} | 🍞 Bread: {row['bread']}\n"
+                            reply += f"🍚 Rice: {row['rice']}g | 🧆 Soya: {row['soya_chunks']}g | 🥛 Whey: {row['whey']}\n\n"
+                    else:
+                        reply = "📭 No historical logs found in your database yet."
+
+                # 3. MANUAL RESET
+                elif incoming_msg in ["reset", "clear"]:
+                    user_logs = {food: 0.0 for food in DIET_TARGETS}
+                    update_database()
+                    reply = "🔄 *Daily Trackers Cleared to Zero.*"
+
+                # 4. ENTRY LOGGING LOGIC
                 else:
                     raw_items = re.split(r'[\n,]+', incoming_msg)
                     logged_entries = []
-                    unmatched_entries = []
-                    logged_foods = set()
 
                     for item in raw_items:
                         item = item.strip()
-                        if not item:
-                            continue
-                        
+                        if not item: continue
                         match = re.match(r"^([0-9\.]+)\s*(.+)$", item)
                         if match:
                             amount = float(match.group(1))
@@ -138,64 +198,22 @@ def webhook_receive():
                             if matched_food:
                                 user_logs[matched_food] += amount
                                 target = DIET_TARGETS[matched_food]["target"]
-                                consumed = user_logs[matched_food]
-                                remaining = target - consumed
+                                remaining = target - user_logs[matched_food]
                                 unit = DIET_TARGETS[matched_food]["unit"]
 
-                                a_str = int(amount) if amount.is_integer() else amount
                                 r_str = int(remaining) if remaining.is_integer() else remaining
-
-                                if remaining > 0:
-                                    status_text = f"({r_str} {unit} remaining)"
-                                elif remaining == 0:
-                                    status_text = "🎯 Target Reached!"
-                                else:
-                                    status_text = f"⚠️ Over by {abs(r_str)} {unit}"
-
-                                logged_entries.append(f"• *{matched_food.title()}*: +{a_str} {unit} logged *{status_text}*")
-                                logged_foods.add(matched_food)
-                            else:
-                                unmatched_entries.append(food_input)
+                                status_text = f"({r_str} {unit} left)" if remaining > 0 else "🎯 Target Reached!"
+                                logged_entries.append(f"• *{matched_food.title()}*: +{amount} {unit} logged {status_text}")
 
                     if logged_entries:
-                        reply = "📥 *Log Executed Successfully*\n\n"
-                        reply += "\n".join(logged_entries)
-                        
-                        # Calculate remaining balance for all other items
-                        other_remaining = []
-                        for food, info in DIET_TARGETS.items():
-                            if food not in logged_foods:
-                                consumed = user_logs[food]
-                                target = info["target"]
-                                remaining = target - consumed
-                                unit = info["unit"]
-
-                                r_str = int(remaining) if isinstance(remaining, int) or remaining.is_integer() else remaining
-                                t_str = int(target) if isinstance(target, int) or target.is_integer() else target
-
-                                if remaining > 0:
-                                    other_remaining.append(f"• *{food.title()}*: {r_str} {unit} remaining")
-                                elif remaining == 0:
-                                    other_remaining.append(f"• *{food.title()}*: ✅ Reached ({t_str} {unit})")
-                                else:
-                                    other_remaining.append(f"• *{food.title()}*: ⚠️ Over by {abs(r_str)} {unit}")
-
-                        if other_remaining:
-                            reply += "\n\n📋 *Remaining Balances*\n" + "\n".join(other_remaining)
-
-                        if unmatched_entries:
-                            reply += f"\n\n⚠️ *Unprocessed Inputs:* {', '.join(unmatched_entries)}"
+                        update_database()
+                        reply = "📥 *Log Executed Successfully*\n\n" + "\n".join(logged_entries)
                     else:
-                        reply = "🤖 *System Assistant | Directory*\n\nPlease use standard syntax for request processing:\n\n"
-                        reply += "• *Log Single Item:* `2 eggs`\n"
-                        reply += "• *Log Batch:* `2 eggs, 1.5 tbsp peanut butter`\n"
-                        reply += "• *Request Dashboard:* `status`\n"
-                        reply += "• *System Reset:* `reset`"
+                        reply = "❌ Invalid syntax. Use format like: `2 eggs` or type `status`, `history 10`"
 
                 send_whatsapp_message(from_number, reply)
     except Exception as e:
-        print(f"Error processing webhook: {e}")
-        
+        print(f"Error handling request: {e}")
     return jsonify({"status": "success"}), 200
 
 if __name__ == "__main__":
