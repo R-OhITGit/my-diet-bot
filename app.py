@@ -28,7 +28,6 @@ def reset_daily_logs():
     user_logs = {food: 0.0 for food in DIET_TARGETS}
     print("⏰ Automatic Midnight Reset: All food logs reset to zero.")
 
-# Initialize background scheduler for midnight reset (Set to your local timezone)
 scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
 scheduler.add_job(reset_daily_logs, 'cron', hour=0, minute=0)
 scheduler.start()
@@ -39,7 +38,6 @@ def health_check():
     return "OK", 200
 
 def send_whatsapp_message(recipient_number, text_body):
-    """Sends a standard text message using Meta Graph API"""
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -101,25 +99,25 @@ def webhook_receive():
 
                     completion_pct = int((completed_count / total_items) * 100)
                     
-                    reply = "📈 *Daily Executive Summary*\n───────────────────\n"
+                    reply = "📈 *Daily Executive Summary*\n\n"
                     if in_progress:
                         reply += "⏳ *In Progress*\n" + "\n".join(in_progress) + "\n\n"
                     if completed:
                         reply += "✅ *Objectives Met*\n" + "\n".join(completed) + "\n\n"
-                    reply += "───────────────────\n"
-                    reply += "🎯 *Daily Objective:* 2,500 kcal | 120g Protein\n"
+                    reply += f"🎯 *Daily Objective:* 2,500 kcal | 120g Protein\n"
                     reply += f"📊 *Completion Rate:* {completion_pct}%"
 
                 # 2. MANUAL RESET COMMAND
                 elif incoming_msg in ["reset", "clear", "reset log"]:
                     reset_daily_logs()
-                    reply = "⚙️ *System Maintenance*\n───────────────────\n🔄 *Daily Metrics Reset Completed*\nAll consumption trackers have been restored to zero."
+                    reply = "⚙️ *System Maintenance*\n\n🔄 *Daily Metrics Reset Completed*\nAll consumption trackers have been restored to zero."
 
-                # 3. LOGGING MULTIPLE OR SINGLE ITEMS
+                # 3. LOGGING ITEMS WITH REMAINING STATUS FOR ALL ITEMS
                 else:
                     raw_items = re.split(r'[\n,]+', incoming_msg)
                     logged_entries = []
                     unmatched_entries = []
+                    logged_foods = set()
 
                     for item in raw_items:
                         item = item.strip()
@@ -150,22 +148,45 @@ def webhook_receive():
                                 if remaining > 0:
                                     status_text = f"({r_str} {unit} remaining)"
                                 elif remaining == 0:
-                                    status_text = "🎯 *Target Reached!*"
+                                    status_text = "🎯 Target Reached!"
                                 else:
-                                    status_text = f"⚠️ *Over by {abs(r_str)} {unit}*"
+                                    status_text = f"⚠️ Over by {abs(r_str)} {unit}"
 
                                 logged_entries.append(f"• *{matched_food.title()}*: +{a_str} {unit} logged *{status_text}*")
+                                logged_foods.add(matched_food)
                             else:
                                 unmatched_entries.append(food_input)
 
                     if logged_entries:
-                        reply = "📥 *Log Executed Successfully*\n───────────────────\n"
+                        reply = "📥 *Log Executed Successfully*\n\n"
                         reply += "\n".join(logged_entries)
+                        
+                        # Calculate remaining balance for all other items
+                        other_remaining = []
+                        for food, info in DIET_TARGETS.items():
+                            if food not in logged_foods:
+                                consumed = user_logs[food]
+                                target = info["target"]
+                                remaining = target - consumed
+                                unit = info["unit"]
+
+                                r_str = int(remaining) if isinstance(remaining, int) or remaining.is_integer() else remaining
+                                t_str = int(target) if isinstance(target, int) or target.is_integer() else target
+
+                                if remaining > 0:
+                                    other_remaining.append(f"• *{food.title()}*: {r_str} {unit} remaining")
+                                elif remaining == 0:
+                                    other_remaining.append(f"• *{food.title()}*: ✅ Reached ({t_str} {unit})")
+                                else:
+                                    other_remaining.append(f"• *{food.title()}*: ⚠️ Over by {abs(r_str)} {unit}")
+
+                        if other_remaining:
+                            reply += "\n\n📋 *Remaining Balances*\n" + "\n".join(other_remaining)
+
                         if unmatched_entries:
                             reply += f"\n\n⚠️ *Unprocessed Inputs:* {', '.join(unmatched_entries)}"
-                        reply += "\n───────────────────\n💡 *Type `status` to view updated dashboard.*"
                     else:
-                        reply = "🤖 *System Assistant | Directory*\n───────────────────\nPlease use standard syntax for request processing:\n\n"
+                        reply = "🤖 *System Assistant | Directory*\n\nPlease use standard syntax for request processing:\n\n"
                         reply += "• *Log Single Item:* `2 eggs`\n"
                         reply += "• *Log Batch:* `2 eggs, 1.5 tbsp peanut butter`\n"
                         reply += "• *Request Dashboard:* `status`\n"
