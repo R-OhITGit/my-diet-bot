@@ -13,7 +13,7 @@ PHONE_NUMBER_ID = "1335444236311842"
 VERIFY_TOKEN = "my_secret_diet_bot_token"
 
 # --- SUPABASE CREDENTIALS ---
-SUPABASE_URL = "https://supabase.com/dashboard/project/ylygykwamxlxadtapdbe"
+SUPABASE_URL = "https://supabase.com"
 SUPABASE_KEY = "sb_publishable_9E3HxGiqRjjGnvTqSkIySg_Yr9PoFKr"
 
 DIET_TARGETS = {
