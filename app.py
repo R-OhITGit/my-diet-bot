@@ -2,10 +2,11 @@ import os
 import re
 import requests
 from flask import Flask, request, jsonify
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
-# --- PASTE YOUR META CREDENTIALS HERE ---
+# --- META CREDENTIALS ---
 ACCESS_TOKEN = "EAAPaOr3UNogBSeScgYCJn8fEjzJ3USnfLPHwvITupw2inGpSeWym20Me6gHRuVUAvGGzD1uOUoTzhOyp3h6ZAD2ZCEEklaonNOIhbdaEeQhcfNWoJYFM562He8JgdfQB95VMnOa86tBxpKi4fA7U6kK2QUjmKKXpTmIGFE3wF70du7ZBmDKZB9v4OeO2Q3NrTAZDZD"
 PHONE_NUMBER_ID = "1335444236311842"
 VERIFY_TOKEN = "my_secret_diet_bot_token"
@@ -21,8 +22,24 @@ DIET_TARGETS = {
 
 user_logs = {food: 0.0 for food in DIET_TARGETS}
 
+# --- MIDNIGHT AUTOMATIC RESET TASK ---
+def reset_daily_logs():
+    global user_logs
+    user_logs = {food: 0.0 for food in DIET_TARGETS}
+    print("⏰ Automatic Midnight Reset: All food logs reset to zero.")
+
+# Initialize background scheduler for midnight reset (Set to your local timezone)
+scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+scheduler.add_job(reset_daily_logs, 'cron', hour=0, minute=0)
+scheduler.start()
+
+# --- LIGHTWEIGHT HEALTHCHECK FOR UPTIMEROBOT ---
+@app.route("/health", methods=["GET"])
+def health_check():
+    return "OK", 200
+
 def send_whatsapp_message(recipient_number, text_body):
-    # LINE 21 FIX: Added graph.facebook.com and API version v18.0
+    """Sends a standard text message using Meta Graph API"""
     url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -51,7 +68,6 @@ def webhook_receive():
     global user_logs
     data = request.get_json()
     try:
-        # LINES 41-43 FIX: Unpack list arrays with [0] to prevent KeyError
         entry = data['entry'][0]
         changes = entry['changes'][0]
         value = changes['value']
@@ -64,54 +80,99 @@ def webhook_receive():
                 incoming_msg = message['text']['body'].lower().strip()
                 reply = ""
 
+                # 1. STATUS COMMAND
                 if incoming_msg == "status":
-                    reply = "📋 *Your Daily Intake Status:*\n\n"
+                    in_progress = []
+                    completed = []
+                    total_items = len(DIET_TARGETS)
+                    completed_count = 0
+
                     for food, info in DIET_TARGETS.items():
                         consumed = user_logs[food]
                         c_str = int(consumed) if consumed.is_integer() else consumed
                         t_str = int(info['target']) if isinstance(info['target'], int) or info['target'].is_integer() else info['target']
-                        reply += f"• *{food.title()}*: {c_str}/{t_str} {info['unit']}\n"
-                    reply += "\n🔥 Total Target: 2500 Cal | 120g Protein"
-
-                elif incoming_msg == "reset":
-                    user_logs = {food: 0.0 for food in DIET_TARGETS}
-                    reply = "🔄 Daily logs have been reset to 0!"
-
-                else:
-                    match = re.match(r"^([0-9\.]+)\s+(.+)$", incoming_msg)
-                    if match:
-                        amount = float(match.group(1))
-                        food_input = match.group(2).strip()
-                        matched_food = None
-                        for food in DIET_TARGETS:
-                            if food in food_input or food_input in food:
-                                matched_food = food
-                                break
-
-                        if matched_food:
-                            user_logs[matched_food] += amount
-                            target = DIET_TARGETS[matched_food]["target"]
-                            consumed = user_logs[matched_food]
-                            remaining = target - consumed
-                            unit = DIET_TARGETS[matched_food]["unit"]
-
-                            a_str = int(amount) if amount.is_integer() else amount
-                            r_str = int(remaining) if remaining.is_integer() else remaining
-
-                            if remaining > 0:
-                                reply = f"✅ {a_str} {matched_food} logged. {r_str} {unit} more to go!"
-                            elif remaining == 0:
-                                reply = f"🎉 Goal reached for {matched_food}!"
-                            else:
-                                reply = f"⚠️ Over Limit! Exceeded {matched_food} by {abs(r_str)} {unit}."
+                        
+                        line = f"• *{food.title()}*: {c_str} / {t_str} {info['unit']}"
+                        if consumed >= info['target']:
+                            completed.append(line)
+                            completed_count += 1
                         else:
-                            reply = "❌ Food item not found."
+                            in_progress.append(line)
+
+                    completion_pct = int((completed_count / total_items) * 100)
+                    
+                    reply = "📈 *Daily Executive Summary*\n───────────────────\n"
+                    if in_progress:
+                        reply += "⏳ *In Progress*\n" + "\n".join(in_progress) + "\n\n"
+                    if completed:
+                        reply += "✅ *Objectives Met*\n" + "\n".join(completed) + "\n\n"
+                    reply += "───────────────────\n"
+                    reply += "🎯 *Daily Objective:* 2,500 kcal | 120g Protein\n"
+                    reply += f"📊 *Completion Rate:* {completion_pct}%"
+
+                # 2. MANUAL RESET COMMAND
+                elif incoming_msg in ["reset", "clear", "reset log"]:
+                    reset_daily_logs()
+                    reply = "⚙️ *System Maintenance*\n───────────────────\n🔄 *Daily Metrics Reset Completed*\nAll consumption trackers have been restored to zero."
+
+                # 3. LOGGING MULTIPLE OR SINGLE ITEMS
+                else:
+                    raw_items = re.split(r'[\n,]+', incoming_msg)
+                    logged_entries = []
+                    unmatched_entries = []
+
+                    for item in raw_items:
+                        item = item.strip()
+                        if not item:
+                            continue
+                        
+                        match = re.match(r"^([0-9\.]+)\s*(.+)$", item)
+                        if match:
+                            amount = float(match.group(1))
+                            food_input = match.group(2).strip()
+                            matched_food = None
+
+                            for food in DIET_TARGETS:
+                                if food in food_input or food_input in food:
+                                    matched_food = food
+                                    break
+
+                            if matched_food:
+                                user_logs[matched_food] += amount
+                                target = DIET_TARGETS[matched_food]["target"]
+                                consumed = user_logs[matched_food]
+                                remaining = target - consumed
+                                unit = DIET_TARGETS[matched_food]["unit"]
+
+                                a_str = int(amount) if amount.is_integer() else amount
+                                r_str = int(remaining) if remaining.is_integer() else remaining
+
+                                if remaining > 0:
+                                    status_text = f"({r_str} {unit} remaining)"
+                                elif remaining == 0:
+                                    status_text = "🎯 *Target Reached!*"
+                                else:
+                                    status_text = f"⚠️ *Over by {abs(r_str)} {unit}*"
+
+                                logged_entries.append(f"• *{matched_food.title()}*: +{a_str} {unit} logged *{status_text}*")
+                            else:
+                                unmatched_entries.append(food_input)
+
+                    if logged_entries:
+                        reply = "📥 *Log Executed Successfully*\n───────────────────\n"
+                        reply += "\n".join(logged_entries)
+                        if unmatched_entries:
+                            reply += f"\n\n⚠️ *Unprocessed Inputs:* {', '.join(unmatched_entries)}"
+                        reply += "\n───────────────────\n💡 *Type `status` to view updated dashboard.*"
                     else:
-                        reply = "❌ Invalid format. Use:\n• `2 eggs`\n• `status`"
+                        reply = "🤖 *System Assistant | Directory*\n───────────────────\nPlease use standard syntax for request processing:\n\n"
+                        reply += "• *Log Single Item:* `2 eggs`\n"
+                        reply += "• *Log Batch:* `2 eggs, 1.5 tbsp peanut butter`\n"
+                        reply += "• *Request Dashboard:* `status`\n"
+                        reply += "• *System Reset:* `reset`"
 
                 send_whatsapp_message(from_number, reply)
     except Exception as e:
-        # LINE 87 FIX: Log error instead of passing silently
         print(f"Error processing webhook: {e}")
         
     return jsonify({"status": "success"}), 200
